@@ -70,4 +70,132 @@ Document: [https://docs.nestjs.com/fundamentals/lazy-loading-modules](https://do
 
 By default, NestJS loads all modules eagerly. This means that all modules are loaded when the application starts, even if they are not used immediately. It may become a bottleneck for large applications or workers running in a serverless environment, or having little to no startup latency or cold start is important.
 
-## IV. Accessing IoC container
+## IV. Accessing IoC Container
+
+NestJS provides powerful tools for accessing its Inversion of Control (IoC) container at runtime through the `DiscoveryService`. This allows us to dynamically discover, filter, and interact with providers based on metadata, types, and custom decorators.
+
+### Goals
+
+With IoC container access, we can:
+
+* Dynamically discover providers at runtime
+* Apply functionality across multiple services without hard-coding dependencies
+* Create extensible plugin systems
+* Implement aspects of Aspect-Oriented Programming (AOP)
+* Build automatic scheduling, event listening, and other cross-cutting concerns
+
+### Implementation Example: Interval Scheduling System
+
+Our implementation demonstrates building a declarative interval scheduling system using IoC container access:
+
+1. **Custom Class Decorator**: `IntervalHost` marks classes that should be scanned for scheduled methods:
+
+```typescript
+// src/scheduler/decorators/interval-host.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const INTERVAL_HOST_KEY = 'INTERVAL_HOST_KEY';
+
+export const IntervalHost: ClassDecorator = SetMetadata(
+  INTERVAL_HOST_KEY,
+  true,
+);
+```
+
+2. **Custom Method Decorator**: `Interval` marks methods that should run on a schedule:
+
+```typescript
+// src/scheduler/decorators/interval.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const INTERVAL_KEY = 'INTERVAL_KEY';
+export const Interval = (ms: number) => SetMetadata(INTERVAL_KEY, ms);
+```
+
+3. **Scheduler Service**: Scans the application for decorated classes and methods:
+
+```typescript
+// src/scheduler/interval.scheduler.ts
+@Injectable()
+export class IntervalScheduler implements OnApplicationBootstrap, OnApplicationShutdown {
+  private readonly intervals: NodeJS.Timeout[] = [];
+
+  constructor(
+    private readonly discoveryService: DiscoveryService,
+    private readonly reflector: Reflector,
+    private readonly metadataScanner: MetadataScanner,
+  ) {}
+
+  onApplicationBootstrap() {
+    // Get all providers in the application
+    const providers = this.discoveryService.getProviders();
+    
+    providers.forEach((wrapper) => {
+      const { instance } = wrapper;
+      const prototype = instance && Object.getPrototypeOf(instance);
+      if (!instance || !prototype) {
+        return;
+      }
+      
+      // Check if this provider (class) is decorated with @IntervalHost
+      const isIntervalHost =
+        this.reflector.get(INTERVAL_HOST_KEY, instance.constructor) ?? false;
+      if (!isIntervalHost) {
+        return;
+      }
+      
+      // Scan all methods in the provider (class)
+      const methodKeys = this.metadataScanner.getAllMethodNames(prototype);
+      methodKeys.forEach((methodKey) => {
+        // Check if method is decorated with @Interval
+        const interval = this.reflector.get(INTERVAL_KEY, instance[methodKey]);
+        if (interval === undefined) {
+          return;
+        }
+        
+        // Schedule the method to run at the specified interval
+        const intervalRef = setInterval(() => instance[methodKey](), interval);
+        this.intervals.push(intervalRef);
+      });
+    });
+  }
+
+  onApplicationShutdown() {
+    // Clean up all intervals when application shuts down
+    this.intervals.forEach((intervalRef) => clearInterval(intervalRef));
+  }
+}
+```
+
+4. **Scheduler Module**: Imports `DiscoveryModule` to enable IoC container access:
+
+```typescript
+// src/scheduler/scheduler.module.ts
+import { Module } from '@nestjs/common';
+import { DiscoveryModule } from '@nestjs/core';
+import { IntervalScheduler } from './interval.scheduler';
+
+@Module({
+  imports: [DiscoveryModule],
+  providers: [IntervalScheduler],
+})
+export class SchedulerModule {}
+```
+
+5. **Usage Example**: Apply decorators to use the scheduling system:
+
+```typescript
+// src/cron/cron.service.ts
+import { IntervalHost } from '../scheduler/decorators/interval-host.decorator';
+import { Interval } from '../scheduler/decorators/interval.decorator';
+
+@IntervalHost
+export class CronService {
+  @Interval(1000)
+  everySecond() {
+    console.log('This will be logged every second');
+  }
+}
+```
+
+This approach demonstrates how NestJS's IoC container empowers developers to build declarative, loosely coupled systems without explicitly wiring dependencies together.
